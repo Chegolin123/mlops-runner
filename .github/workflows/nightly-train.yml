@@ -1,0 +1,101 @@
+name: nightly-train
+
+on:
+  schedule:
+    # 01:00 UTC ≈ 04:00 МСК — ПК свободен
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+    inputs:
+      episodes:
+        description: "Сколько эпизодов тренировать"
+        default: "500"
+        required: true
+      speed:
+        description: "Скорость симуляции (1/2/4/8)"
+        default: "4"
+        required: true
+
+concurrency:
+  group: nightly-train
+  cancel-in-progress: false
+
+jobs:
+  train:
+    # Только свой runner: чужие машины не должны получать GPU-job
+    runs-on: [self-hosted, gpu, linux]
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout mk-ai
+        uses: actions/checkout@v4
+        with:
+          repository: Chegolin123/mk-ai
+          path: mk-ai
+
+      - name: Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Кэш pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-torch-cu124-${{ hashFiles('mk-ai/requirements.txt') }}
+
+      - name: Зависимости
+        working-directory: mk-ai
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cu124
+          pip install pygame numpy pillow
+
+      - name: GPU видна?
+        run: nvidia-smi
+
+      - name: Тренировка
+        working-directory: mk-ai
+        env:
+          SDL_VIDEODRIVER: dummy
+          SDL_AUDIODRIVER: dummy
+        run: |
+          . .venv/bin/activate
+          python game.py --headless \
+            --episodes "${{ inputs.episodes || 500 }}" \
+            --speed "${{ inputs.speed || 4 }}" \
+            --seed 7 | tee train.log
+
+      - name: Метрики
+        working-directory: mk-ai
+        run: |
+          . .venv/bin/activate
+          python ../scripts/collect_metrics.py train.log -o ../metrics/run.json
+
+      - name: Сводка в Job Summary
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          p = pathlib.Path("metrics/run.json")
+          if not p.exists():
+              print("Метрик нет — тренировка упала до парсинга лога.")
+              raise SystemExit(0)
+          d = json.loads(p.read_text(encoding="utf-8"))
+          print("### Ночная тренировка\n")
+          print(f"- устройство: `{d.get('device')}`")
+          print(f"- эпизодов: **{d.get('episodes')}** за {d.get('duration_s')} c ({d.get('episodes_per_s')} эп/с)")
+          print(f"- побед: **{d.get('wins')}**, winrate **{d.get('winrate')}**")
+          print(f"- средние удары: {d.get('avg_hits')}")
+          PY
+
+      - name: Артефакты
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mk-ai-train-${{ github.run_number }}
+          path: |
+            metrics/run.json
+            mk-ai/train.log
+          retention-days: 30

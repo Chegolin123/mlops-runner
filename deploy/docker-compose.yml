@@ -1,0 +1,23 @@
+services:
+  runner:
+    build:
+      context: ..
+      dockerfile: docker/runner.Dockerfile
+    image: mlops-runner:latest
+    container_name: mlops-runner
+    restart: unless-stopped
+    environment:
+      REPO_URL: ${REPO_URL:?нужен REPO_URL}
+      ACCESS_TOKEN: ${ACCESS_TOKEN:?нужен ACCESS_TOKEN (registration token)}
+      RUNNER_NAME: ${RUNNER_NAME:-gpu-runner}
+      LABELS: ${LABELS:-self-hosted,gpu,linux}
+    volumes:
+      # _work переживает пересоздание контейнера; при пересоздании нужен свежий ACCESS_TOKEN
+      - runner-work:/actions-runner/_work
+    # GPU внутрь контейнера
+    gpus: all
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  runner-work:
